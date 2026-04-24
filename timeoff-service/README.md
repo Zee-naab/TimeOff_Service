@@ -1,6 +1,6 @@
 # TimeOff Service
 
-A NestJS REST API for managing employee time-off requests, leave balances, and HCM (Human Capital Management) synchronization. Ships with a separate mock HCM Express server for local development.
+A NestJS REST API for managing employee time-off requests and leave balances, with HCM (Human Capital Management) synchronisation. Ships with a separate mock HCM Express server for local development.
 
 ## Prerequisites
 
@@ -12,28 +12,69 @@ A NestJS REST API for managing employee time-off requests, leave balances, and H
 ```
 timeoff-service/
 ├── src/
+│   ├── database/                   ← Shared database layer
+│   │   ├── entities/               ← All TypeORM entity classes
+│   │   │   ├── employee.entity.ts
+│   │   │   ├── location.entity.ts
+│   │   │   ├── leave-type.entity.ts
+│   │   │   ├── ledger-entry.entity.ts   ← Balance ledger (replaces leave_balances)
+│   │   │   ├── time-off-request.entity.ts
+│   │   │   └── sync-log.entity.ts
+│   │   ├── repositories/           ← Custom repository classes (all DB queries)
+│   │   │   ├── employee.repository.ts
+│   │   │   ├── location.repository.ts
+│   │   │   ├── leave-type.repository.ts
+│   │   │   ├── ledger-entry.repository.ts
+│   │   │   ├── time-off-request.repository.ts
+│   │   │   └── sync-log.repository.ts
+│   │   ├── types/                  ← Shared TypeScript interfaces
+│   │   │   ├── balance.types.ts    ← BalanceSummary
+│   │   │   └── hcm.types.ts        ← HCM response shapes
+│   │   └── database.module.ts      ← Registers all entities + exports all repositories
 │   ├── modules/
-│   │   ├── employees/          ← Employee CRUD
-│   │   ├── locations/          ← Office location CRUD
-│   │   ├── leave-types/        ← Leave type CRUD (Vacation, Sick, Personal)
-│   │   ├── leave-balances/     ← Employee leave balance management
-│   │   ├── time-off-requests/  ← Time-off request submission & approval
-│   │   └── sync/               ← HCM sync (realtime & batch)
+│   │   ├── employees/              ← Employee CRUD
+│   │   ├── locations/              ← Office location CRUD
+│   │   ├── leave-types/            ← Leave type CRUD (Vacation, Sick, Personal)
+│   │   ├── leave-balances/         ← Balance queries & ledger-entry management
+│   │   ├── time-off-requests/      ← Time-off request submission & approval
+│   │   └── sync/                   ← HCM sync (realtime & batch)
 │   ├── common/
-│   │   ├── filters/            ← Global exception filter
-│   │   ├── guards/             ← API key guard
-│   │   └── interceptors/       ← HTTP logging interceptor
+│   │   ├── filters/                ← Global exception filter
+│   │   ├── guards/                 ← API key guard
+│   │   └── interceptors/           ← HTTP logging interceptor
 │   ├── config/
 │   │   └── database.config.ts
 │   ├── app.module.ts
 │   └── main.ts
-├── mock-hcm/                   ← Standalone mock HCM Express server
+├── mock-hcm/                       ← Standalone mock HCM Express server
 │   ├── src/main.ts
 │   └── package.json
 ├── test/
-│   ├── unit/                   ← Unit tests (jest)
-│   └── e2e/                    ← End-to-end tests (supertest)
+│   ├── unit/                       ← Unit tests (Jest + mock repositories)
+│   └── integration/                ← Integration tests (real SQLite :memory:)
 └── .env
+```
+
+### Balance Ledger
+
+Leave balances are stored as an **append-only ledger** (`ledger_entries` table) rather than a single mutable row per combination. Every balance change is a new immutable entry:
+
+| Entry Type | When written | `amount` sign |
+|------------|-------------|---------------|
+| `SYNC` | HCM realtime or batch sync | Delta to HCM value (positive or negative) |
+| `DEDUCTION` | Request approved | Negative (days taken) |
+| `RESTORATION` | Approved request rejected or cancelled | Positive (days returned) |
+
+**Current balance** = `SELECT SUM(amount) FROM ledger_entries WHERE employee_id=? AND location_id=? AND leave_type_id=?`
+
+Every balance change is auditable by definition — no separate audit log is needed.
+
+### Repository Pattern
+
+All TypeORM queries live in custom repository classes (`src/database/repositories/`). Feature modules import a shared `DatabaseModule` to access them. Services contain only business logic.
+
+```
+Controller → Service → Repository → SQLite
 ```
 
 ## Installation
@@ -76,7 +117,7 @@ Start the mock HCM server **before** using the sync endpoints. It seeds 3 employ
 ```bash
 cd timeoff-service/mock-hcm
 npm start          # production
-npm run start:dev  # watch mode (ts-node-dev)
+npm run dev        # watch mode (nodemon + ts-node)
 ```
 
 Runs on **http://localhost:4000**
@@ -125,12 +166,17 @@ Interactive Swagger UI is available at:
 | DELETE | `/employees/:id` | Delete employee |
 
 ### Leave Balances
+
+`GET` responses return **computed summaries** — balance is derived from `SUM(ledger_entries.amount)` for the combination. `POST` seeds an opening balance. `/:id` endpoints operate on individual ledger entry rows.
+
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/leave-balances` | List all balances |
-| GET | `/leave-balances/employee/:id` | Balances for one employee |
-| POST | `/leave-balances` | Create balance record |
-| PUT | `/leave-balances/:id` | Update balance |
+| GET | `/leave-balances` | Computed balance summaries for all (employee, location, leave_type) combinations |
+| GET | `/leave-balances/employee/:id` | Computed balance summaries for one employee |
+| GET | `/leave-balances/:id` | Get a specific ledger entry by its row ID |
+| POST | `/leave-balances` | Seed an opening balance (adds a SYNC ledger entry) |
+| PUT | `/leave-balances/:id` | Update a ledger entry's amount (manual correction) |
+| DELETE | `/leave-balances/:id` | Remove a specific ledger entry |
 
 ### Time Off Requests
 | Method | Path | Description |
@@ -145,7 +191,7 @@ Interactive Swagger UI is available at:
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/sync/logs` | View all sync log entries |
-| POST | `/sync/realtime` | Sync one balance from HCM |
+| POST | `/sync/realtime` | Sync one balance from HCM (appends SYNC ledger entry) |
 | POST | `/sync/batch` | Sync all balances from HCM |
 
 ## Error Response Format
@@ -167,7 +213,7 @@ All errors follow a consistent format:
 ```bash
 cd timeoff-service
 
-# Unit tests
+# Unit tests (mock repositories, no DB)
 npm run test
 
 # Unit tests in watch mode
@@ -179,6 +225,19 @@ npm run test:cov
 # End-to-end tests (requires no running server on port 3000)
 npm run test:e2e
 ```
+
+**33 tests across 6 suites:**
+
+| Suite | Type | Tests |
+|-------|------|-------|
+| `employees.service.spec.ts` | Unit | 7 |
+| `leave-balances.service.spec.ts` | Unit | 3 |
+| `time-off-requests.service.spec.ts` | Unit | 8 |
+| `sync.service.spec.ts` | Unit | 4 |
+| `leave-balance-sync.spec.ts` | Integration | 3 |
+| `time-off-request-flow.spec.ts` | Integration | 5 |
+
+Unit tests mock all custom repository classes directly — no `getRepositoryToken` wiring needed. Integration tests run against a real `better-sqlite3` in-memory database with only `HttpService` (HCM calls) mocked via `jest.spyOn`.
 
 ## Mock HCM Server Details
 
@@ -222,10 +281,10 @@ curl -X POST http://localhost:4000/hcm/simulate/anniversary \
   -H "x-api-key: mock-hcm-secret" \
   -H "Content-Type: application/json" \
   -d '{ "employeeId": 1, "locationId": 1, "leaveTypeId": 1, "bonusDays": 3 }'
-# → { "success": true, "employeeId": 1, "locationId": 1, "leaveTypeId": 1, "balance": 13, "bonusDaysAdded": 3 }
+# → { "success": true, ..., "balance": 13, "bonusDaysAdded": 3 }
 ```
 
-After running the anniversary endpoint, call `POST /sync/realtime` in the main service to pull the updated balance into the local database.
+After running the anniversary endpoint, call `POST /sync/realtime` in the main service to pull the updated balance into the local ledger.
 
 ## Typical Dev Workflow
 
@@ -233,5 +292,6 @@ After running the anniversary endpoint, call `POST /sync/realtime` in the main s
 2. Start the main service: `cd .. && npm run start:dev`
 3. Open Swagger UI at http://localhost:3000/api/docs
 4. Create employees, locations, and leave types via the API
-5. Create leave balance records, or use `POST /sync/batch` to pull all balances from HCM
+5. Seed leave balance records via `POST /leave-balances`, or use `POST /sync/batch` to pull all balances from HCM
 6. Submit time-off requests and approve/reject them
+7. Run `POST /sync/realtime` after an anniversary bonus to pull the updated balance into the local ledger
