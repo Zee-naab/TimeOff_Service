@@ -1,34 +1,24 @@
-import { Injectable, NotFoundException, ConflictException } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { Location } from './location.entity';
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { Location } from '../../database/entities/location.entity';
+import { LocationRepository } from '../../database/repositories/location.repository';
 import { CreateLocationDto } from './dto/create-location.dto';
 import { UpdateLocationDto } from './dto/update-location.dto';
 
 @Injectable()
 export class LocationsService {
-  constructor(
-    @InjectRepository(Location)
-    private readonly locationRepository: Repository<Location>,
-  ) {}
+  constructor(private readonly locationRepository: LocationRepository) {}
 
   findAll(): Promise<Location[]> {
-    return this.locationRepository.find({ order: { created_at: 'DESC' } });
+    return this.locationRepository.findAll();
   }
 
   async findOne(id: number): Promise<Location> {
-    const location = await this.locationRepository.findOneBy({ id });
-    if (!location) {
-      throw new NotFoundException(`Location with ID ${id} not found`);
-    }
+    const location = await this.locationRepository.findOne(id);
+    if (!location) throw new NotFoundException(`Location with ID ${id} not found`);
     return location;
   }
 
   async create(dto: CreateLocationDto): Promise<Location> {
-    const existing = await this.locationRepository.findOneBy({ name: dto.name });
-    if (existing) {
-      throw new ConflictException(`Location with name "${dto.name}" already exists`);
-    }
     const location = this.locationRepository.create(dto);
     return this.locationRepository.save(location);
   }

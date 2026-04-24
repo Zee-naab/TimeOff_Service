@@ -1,28 +1,24 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { getRepositoryToken } from '@nestjs/typeorm';
 import { HttpService } from '@nestjs/axios';
 import { ConfigService } from '@nestjs/config';
 import { of, throwError } from 'rxjs';
 import { SyncService } from '../../src/modules/sync/sync.service';
-import { SyncLog, SyncType, SyncStatus } from '../../src/modules/sync/sync-log.entity';
-import { LeaveBalance } from '../../src/modules/leave-balances/leave-balance.entity';
+import { SyncType, SyncStatus } from '../../src/database/entities/sync-log.entity';
+import { SyncLogRepository } from '../../src/database/repositories/sync-log.repository';
+import { LedgerEntryRepository } from '../../src/database/repositories/ledger-entry.repository';
+import { LedgerEntryType } from '../../src/database/entities/ledger-entry.entity';
 
 const mockSyncLogRepo = () => ({
-  find: jest.fn(),
-  create: jest.fn(),
-  save: jest.fn(),
+  findAll: jest.fn(),
+  createLog: jest.fn(),
 });
 
-const mockLeaveBalanceRepo = () => ({
-  findOne: jest.fn(),
-  create: jest.fn(),
-  save: jest.fn(),
+const mockLedgerRepo = () => ({
+  computeBalance: jest.fn(),
+  addEntry: jest.fn(),
 });
 
-const mockHttpService = () => ({
-  get: jest.fn(),
-  post: jest.fn(),
-});
+const mockHttpService = () => ({ get: jest.fn(), post: jest.fn() });
 
 const mockConfigService = () => ({
   get: jest.fn().mockImplementation((key: string, defaultVal?: string) => {
@@ -38,14 +34,14 @@ describe('SyncService', () => {
   let service: SyncService;
   let http: ReturnType<typeof mockHttpService>;
   let syncLogRepo: ReturnType<typeof mockSyncLogRepo>;
-  let leaveBalanceRepo: ReturnType<typeof mockLeaveBalanceRepo>;
+  let ledgerRepo: ReturnType<typeof mockLedgerRepo>;
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         SyncService,
-        { provide: getRepositoryToken(SyncLog), useFactory: mockSyncLogRepo },
-        { provide: getRepositoryToken(LeaveBalance), useFactory: mockLeaveBalanceRepo },
+        { provide: SyncLogRepository, useFactory: mockSyncLogRepo },
+        { provide: LedgerEntryRepository, useFactory: mockLedgerRepo },
         { provide: HttpService, useFactory: mockHttpService },
         { provide: ConfigService, useFactory: mockConfigService },
       ],
@@ -53,8 +49,8 @@ describe('SyncService', () => {
 
     service = module.get<SyncService>(SyncService);
     http = module.get(HttpService);
-    syncLogRepo = module.get(getRepositoryToken(SyncLog));
-    leaveBalanceRepo = module.get(getRepositoryToken(LeaveBalance));
+    syncLogRepo = module.get(SyncLogRepository);
+    ledgerRepo = module.get(LedgerEntryRepository);
   });
 
   // ─── syncRealtime ────────────────────────────────────────────────────────────
@@ -64,13 +60,11 @@ describe('SyncService', () => {
       http.get.mockReturnValue(
         of({ data: { success: true, employeeId: 1, locationId: 1, leaveTypeId: 1, balance: 15 } }),
       );
-      leaveBalanceRepo.findOne.mockResolvedValue(null);
-      leaveBalanceRepo.create.mockReturnValue({ balance: 15 });
-      leaveBalanceRepo.save.mockResolvedValue({ id: 1, balance: 15 });
+      ledgerRepo.computeBalance.mockResolvedValue(10);
+      ledgerRepo.addEntry.mockResolvedValue({ id: 1, amount: 5, entry_type: LedgerEntryType.SYNC });
 
       const log = { type: SyncType.REALTIME, status: SyncStatus.SUCCESS, id: 1 };
-      syncLogRepo.create.mockReturnValue(log);
-      syncLogRepo.save.mockResolvedValue(log);
+      syncLogRepo.createLog.mockResolvedValue(log);
 
       const result = await service.syncRealtime(1, 1, 1);
 
@@ -78,7 +72,7 @@ describe('SyncService', () => {
         'http://localhost:4000/hcm/balance/1/1/1',
         { headers: { 'x-api-key': 'mock-hcm-secret' } },
       );
-      expect(leaveBalanceRepo.save).toHaveBeenCalled();
+      expect(ledgerRepo.addEntry).toHaveBeenCalledWith(1, 1, 1, 5, LedgerEntryType.SYNC);
       expect(result.status).toBe(SyncStatus.SUCCESS);
     });
 
@@ -86,12 +80,11 @@ describe('SyncService', () => {
       http.get.mockReturnValue(throwError(() => new Error('Connection refused')));
 
       const log = { type: SyncType.REALTIME, status: SyncStatus.FAILED, id: 2 };
-      syncLogRepo.create.mockReturnValue(log);
-      syncLogRepo.save.mockResolvedValue(log);
+      syncLogRepo.createLog.mockResolvedValue(log);
 
       const result = await service.syncRealtime(1, 1, 1);
 
-      expect(leaveBalanceRepo.save).not.toHaveBeenCalled();
+      expect(ledgerRepo.addEntry).not.toHaveBeenCalled();
       expect(result.status).toBe(SyncStatus.FAILED);
     });
   });
@@ -105,13 +98,11 @@ describe('SyncService', () => {
         { employeeId: 1, locationId: 1, leaveTypeId: 2, balance: 5 },
       ];
       http.post.mockReturnValue(of({ data: { success: true, balances } }));
-      leaveBalanceRepo.findOne.mockResolvedValue(null);
-      leaveBalanceRepo.create.mockReturnValue({});
-      leaveBalanceRepo.save.mockResolvedValue({ id: 1 });
+      ledgerRepo.computeBalance.mockResolvedValue(0);
+      ledgerRepo.addEntry.mockResolvedValue({ id: 1 });
 
       const log = { type: SyncType.BATCH, status: SyncStatus.SUCCESS, id: 3 };
-      syncLogRepo.create.mockReturnValue(log);
-      syncLogRepo.save.mockResolvedValue(log);
+      syncLogRepo.createLog.mockResolvedValue(log);
 
       const result = await service.syncBatch();
 
@@ -120,7 +111,7 @@ describe('SyncService', () => {
         {},
         { headers: { 'x-api-key': 'mock-hcm-secret' } },
       );
-      expect(leaveBalanceRepo.save).toHaveBeenCalledTimes(2);
+      expect(ledgerRepo.addEntry).toHaveBeenCalledTimes(2);
       expect(result.status).toBe(SyncStatus.SUCCESS);
     });
 
@@ -128,12 +119,11 @@ describe('SyncService', () => {
       http.post.mockReturnValue(of({ data: { success: true, balances: [] } }));
 
       const log = { type: SyncType.BATCH, status: SyncStatus.SUCCESS, id: 4 };
-      syncLogRepo.create.mockReturnValue(log);
-      syncLogRepo.save.mockResolvedValue(log);
+      syncLogRepo.createLog.mockResolvedValue(log);
 
       const result = await service.syncBatch();
 
-      expect(leaveBalanceRepo.save).not.toHaveBeenCalled();
+      expect(ledgerRepo.addEntry).not.toHaveBeenCalled();
       expect(result.status).toBe(SyncStatus.SUCCESS);
     });
   });

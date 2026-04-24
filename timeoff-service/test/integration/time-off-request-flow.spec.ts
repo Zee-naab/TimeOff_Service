@@ -4,18 +4,19 @@ import { ConfigModule } from '@nestjs/config';
 import { BadRequestException } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 
+import { DatabaseModule } from '../../src/database/database.module';
 import { EmployeesModule } from '../../src/modules/employees/employees.module';
 import { LocationsModule } from '../../src/modules/locations/locations.module';
 import { LeaveTypesModule } from '../../src/modules/leave-types/leave-types.module';
 import { LeaveBalancesModule } from '../../src/modules/leave-balances/leave-balances.module';
 import { TimeOffRequestsModule } from '../../src/modules/time-off-requests/time-off-requests.module';
 
-import { Employee } from '../../src/modules/employees/employee.entity';
-import { Location } from '../../src/modules/locations/location.entity';
-import { LeaveType } from '../../src/modules/leave-types/leave-type.entity';
-import { LeaveBalance } from '../../src/modules/leave-balances/leave-balance.entity';
-import { TimeOffRequest, TimeOffRequestStatus } from '../../src/modules/time-off-requests/time-off-request.entity';
-import { SyncLog } from '../../src/modules/sync/sync-log.entity';
+import { Employee } from '../../src/database/entities/employee.entity';
+import { Location } from '../../src/database/entities/location.entity';
+import { LeaveType } from '../../src/database/entities/leave-type.entity';
+import { LedgerEntry } from '../../src/database/entities/ledger-entry.entity';
+import { TimeOffRequest, TimeOffRequestStatus } from '../../src/database/entities/time-off-request.entity';
+import { SyncLog } from '../../src/database/entities/sync-log.entity';
 
 import { EmployeesService } from '../../src/modules/employees/employees.service';
 import { LocationsService } from '../../src/modules/locations/locations.service';
@@ -35,7 +36,6 @@ describe('Time Off Request Flow (Integration)', () => {
   let leaveBalancesService: LeaveBalancesService;
   let timeOffRequestsService: TimeOffRequestsService;
 
-  // Shared test context
   let employee: Employee;
   let location: Location;
   let leaveType: LeaveType;
@@ -47,9 +47,10 @@ describe('Time Off Request Flow (Integration)', () => {
         TypeOrmModule.forRoot({
           type: 'better-sqlite3',
           database: ':memory:',
-          entities: [Employee, Location, LeaveType, LeaveBalance, TimeOffRequest, SyncLog],
+          entities: [Employee, Location, LeaveType, LedgerEntry, TimeOffRequest, SyncLog],
           synchronize: true,
         }),
+        DatabaseModule,
         EmployeesModule,
         LocationsModule,
         LeaveTypesModule,
@@ -72,12 +73,11 @@ describe('Time Off Request Flow (Integration)', () => {
 
   beforeEach(async () => {
     await dataSource.query('DELETE FROM time_off_requests');
-    await dataSource.query('DELETE FROM leave_balances');
+    await dataSource.query('DELETE FROM ledger_entries');
     await dataSource.query('DELETE FROM employees');
     await dataSource.query('DELETE FROM locations');
     await dataSource.query('DELETE FROM leave_types');
 
-    // Fresh test data every test
     employee = await employeesService.create({ name: 'Bob', email: `bob+${Date.now()}@test.com` });
     location = await locationsService.create({ name: `Office-${Date.now()}` });
     leaveType = await leaveTypesService.create({ name: `Vacation-${Date.now()}` });
@@ -101,8 +101,6 @@ describe('Time Off Request Flow (Integration)', () => {
     };
   }
 
-  // ─── Tests ───────────────────────────────────────────────────────────────────
-
   it('creates a request then approves it → balance is deducted', async () => {
     const req = await timeOffRequestsService.create(makeDto(5));
     expect(req.status).toBe(TimeOffRequestStatus.PENDING);
@@ -112,25 +110,23 @@ describe('Time Off Request Flow (Integration)', () => {
     const balance = await leaveBalancesService.findByEmployeeLocationLeaveType(
       employee.id, location.id, leaveType.id,
     );
-    expect(Number(balance?.balance)).toBe(5); // 10 - 5 = 5
+    expect(Number(balance?.balance)).toBe(5);
   });
 
   it('creates a request, approves, then rejects it → balance is fully restored', async () => {
     const req = await timeOffRequestsService.create(makeDto(5));
     await timeOffRequestsService.updateStatus(req.id, { status: TimeOffRequestStatus.APPROVED });
-
     await timeOffRequestsService.updateStatus(req.id, { status: TimeOffRequestStatus.REJECTED });
 
     const balance = await leaveBalancesService.findByEmployeeLocationLeaveType(
       employee.id, location.id, leaveType.id,
     );
-    expect(Number(balance?.balance)).toBe(10); // restored to original
+    expect(Number(balance?.balance)).toBe(10);
   });
 
   it('creates a request, approves, then cancels it → balance is fully restored', async () => {
     const req = await timeOffRequestsService.create(makeDto(5));
     await timeOffRequestsService.updateStatus(req.id, { status: TimeOffRequestStatus.APPROVED });
-
     await timeOffRequestsService.updateStatus(req.id, { status: TimeOffRequestStatus.CANCELLED });
 
     const balance = await leaveBalancesService.findByEmployeeLocationLeaveType(
@@ -144,8 +140,6 @@ describe('Time Off Request Flow (Integration)', () => {
   });
 
   it('prevents over-deduction: second approval fails after first depletes balance', async () => {
-    // Both requests are for 8 days. Balance is 10 so both can be created (pending).
-    // After the first is approved (balance = 2), the second approval must fail.
     const req1 = await timeOffRequestsService.create(makeDto(8));
     const req2 = await timeOffRequestsService.create(makeDto(8));
 
@@ -163,6 +157,6 @@ describe('Time Off Request Flow (Integration)', () => {
     const balanceUnchanged = await leaveBalancesService.findByEmployeeLocationLeaveType(
       employee.id, location.id, leaveType.id,
     );
-    expect(Number(balanceUnchanged?.balance)).toBe(2); // still 2, not over-deducted
+    expect(Number(balanceUnchanged?.balance)).toBe(2);
   });
 });

@@ -1,8 +1,8 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { getRepositoryToken } from '@nestjs/typeorm';
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { TimeOffRequestsService } from '../../src/modules/time-off-requests/time-off-requests.service';
-import { TimeOffRequest, TimeOffRequestStatus } from '../../src/modules/time-off-requests/time-off-request.entity';
+import { TimeOffRequest, TimeOffRequestStatus } from '../../src/database/entities/time-off-request.entity';
+import { TimeOffRequestRepository } from '../../src/database/repositories/time-off-request.repository';
 import { LeaveBalancesService } from '../../src/modules/leave-balances/leave-balances.service';
 import { CreateTimeOffRequestDto } from '../../src/modules/time-off-requests/dto/create-time-off-request.dto';
 import { UpdateTimeOffRequestStatusDto } from '../../src/modules/time-off-requests/dto/update-time-off-request-status.dto';
@@ -29,8 +29,9 @@ const stubRequest = (overrides: Partial<TimeOffRequest> = {}): TimeOffRequest =>
   } as TimeOffRequest);
 
 const mockRepo = () => ({
-  find: jest.fn(),
+  findAll: jest.fn(),
   findOne: jest.fn(),
+  findByEmployee: jest.fn(),
   create: jest.fn(),
   save: jest.fn(),
   remove: jest.fn(),
@@ -51,13 +52,13 @@ describe('TimeOffRequestsService', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         TimeOffRequestsService,
-        { provide: getRepositoryToken(TimeOffRequest), useFactory: mockRepo },
+        { provide: TimeOffRequestRepository, useFactory: mockRepo },
         { provide: LeaveBalancesService, useFactory: mockLeaveBalancesService },
       ],
     }).compile();
 
     service = module.get<TimeOffRequestsService>(TimeOffRequestsService);
-    repo = module.get(getRepositoryToken(TimeOffRequest));
+    repo = module.get(TimeOffRequestRepository);
     lbService = module.get(LeaveBalancesService);
   });
 
@@ -87,10 +88,7 @@ describe('TimeOffRequestsService', () => {
 
     it('throws BadRequestException when balance is insufficient', async () => {
       lbService.findByEmployeeLocationLeaveType.mockResolvedValue({ balance: 3 });
-
-      await expect(service.create({ ...validDto, days_requested: 5 })).rejects.toThrow(
-        BadRequestException,
-      );
+      await expect(service.create({ ...validDto, days_requested: 5 })).rejects.toThrow(BadRequestException);
     });
 
     it('throws BadRequestException when start_date is after end_date', async () => {
@@ -101,7 +99,6 @@ describe('TimeOffRequestsService', () => {
 
     it('throws BadRequestException when no balance record exists for the combination', async () => {
       lbService.findByEmployeeLocationLeaveType.mockResolvedValue(null);
-
       await expect(service.create(validDto)).rejects.toThrow(BadRequestException);
     });
   });
@@ -111,7 +108,6 @@ describe('TimeOffRequestsService', () => {
   describe('findOne', () => {
     it('throws NotFoundException when request does not exist', async () => {
       repo.findOne.mockResolvedValue(null);
-
       await expect(service.findOne(999)).rejects.toThrow(NotFoundException);
     });
   });
@@ -129,10 +125,7 @@ describe('TimeOffRequestsService', () => {
       await service.updateStatus(1, dto);
 
       expect(lbService.deductBalance).toHaveBeenCalledWith(
-        req.employee.id,
-        req.location.id,
-        req.leave_type.id,
-        Number(req.days_requested),
+        req.employee.id, req.location.id, req.leave_type.id, Number(req.days_requested),
       );
     });
 
@@ -146,10 +139,7 @@ describe('TimeOffRequestsService', () => {
       await service.updateStatus(1, dto);
 
       expect(lbService.restoreBalance).toHaveBeenCalledWith(
-        req.employee.id,
-        req.location.id,
-        req.leave_type.id,
-        Number(req.days_requested),
+        req.employee.id, req.location.id, req.leave_type.id, Number(req.days_requested),
       );
     });
 
@@ -163,10 +153,7 @@ describe('TimeOffRequestsService', () => {
       await service.updateStatus(1, dto);
 
       expect(lbService.restoreBalance).toHaveBeenCalledWith(
-        req.employee.id,
-        req.location.id,
-        req.leave_type.id,
-        Number(req.days_requested),
+        req.employee.id, req.location.id, req.leave_type.id, Number(req.days_requested),
       );
     });
 

@@ -5,18 +5,19 @@ import { HttpService } from '@nestjs/axios';
 import { of } from 'rxjs';
 import { DataSource } from 'typeorm';
 
+import { DatabaseModule } from '../../src/database/database.module';
 import { EmployeesModule } from '../../src/modules/employees/employees.module';
 import { LocationsModule } from '../../src/modules/locations/locations.module';
 import { LeaveTypesModule } from '../../src/modules/leave-types/leave-types.module';
 import { LeaveBalancesModule } from '../../src/modules/leave-balances/leave-balances.module';
 import { SyncModule } from '../../src/modules/sync/sync.module';
 
-import { Employee } from '../../src/modules/employees/employee.entity';
-import { Location } from '../../src/modules/locations/location.entity';
-import { LeaveType } from '../../src/modules/leave-types/leave-type.entity';
-import { LeaveBalance } from '../../src/modules/leave-balances/leave-balance.entity';
-import { TimeOffRequest } from '../../src/modules/time-off-requests/time-off-request.entity';
-import { SyncLog, SyncStatus } from '../../src/modules/sync/sync-log.entity';
+import { Employee } from '../../src/database/entities/employee.entity';
+import { Location } from '../../src/database/entities/location.entity';
+import { LeaveType } from '../../src/database/entities/leave-type.entity';
+import { LedgerEntry } from '../../src/database/entities/ledger-entry.entity';
+import { TimeOffRequest } from '../../src/database/entities/time-off-request.entity';
+import { SyncLog, SyncStatus } from '../../src/database/entities/sync-log.entity';
 
 import { EmployeesService } from '../../src/modules/employees/employees.service';
 import { LocationsService } from '../../src/modules/locations/locations.service';
@@ -48,9 +49,10 @@ describe('Leave Balance Sync (Integration)', () => {
         TypeOrmModule.forRoot({
           type: 'better-sqlite3',
           database: ':memory:',
-          entities: [Employee, Location, LeaveType, LeaveBalance, TimeOffRequest, SyncLog],
+          entities: [Employee, Location, LeaveType, LedgerEntry, TimeOffRequest, SyncLog],
           synchronize: true,
         }),
+        DatabaseModule,
         EmployeesModule,
         LocationsModule,
         LeaveTypesModule,
@@ -75,13 +77,13 @@ describe('Leave Balance Sync (Integration)', () => {
 
   beforeEach(async () => {
     await dataSource.query('DELETE FROM sync_logs');
-    await dataSource.query('DELETE FROM leave_balances');
+    await dataSource.query('DELETE FROM ledger_entries');
+    await dataSource.query('DELETE FROM time_off_requests');
     await dataSource.query('DELETE FROM employees');
     await dataSource.query('DELETE FROM locations');
     await dataSource.query('DELETE FROM leave_types');
   });
 
-  // ─── Helper ───────────────────────────────────────────────────────────────────
   async function createTestData() {
     const employee = await employeesService.create({ name: 'Alice', email: 'alice@test.com' });
     const location = await locationsService.create({ name: 'Berlin' });
@@ -89,9 +91,7 @@ describe('Leave Balance Sync (Integration)', () => {
     return { employee, location, leaveType };
   }
 
-  // ─── Tests ───────────────────────────────────────────────────────────────────
-
-  it('syncs a realtime balance from HCM and updates the local DB record', async () => {
+  it('syncs a realtime balance from HCM and updates the local ledger', async () => {
     const { employee, location, leaveType } = await createTestData();
     await leaveBalancesService.create({
       employee_id: employee.id,
@@ -100,7 +100,6 @@ describe('Leave Balance Sync (Integration)', () => {
       balance: 10,
     });
 
-    // HCM returns an updated balance of 15
     jest.spyOn(httpService, 'get').mockReturnValue(
       of({ data: { success: true, employeeId: employee.id, locationId: location.id, leaveTypeId: leaveType.id, balance: 15 } } as any),
     );
@@ -114,7 +113,7 @@ describe('Leave Balance Sync (Integration)', () => {
     expect(Number(updated?.balance)).toBe(15);
   });
 
-  it('syncs all balances via batch and updates every local DB record', async () => {
+  it('syncs all balances via batch and updates every local ledger record', async () => {
     const { employee, location, leaveType } = await createTestData();
     const leaveType2 = await leaveTypesService.create({ name: 'Sick' });
 
@@ -152,7 +151,6 @@ describe('Leave Balance Sync (Integration)', () => {
       balance: 10,
     });
 
-    // HCM has already applied the +5 anniversary bonus (balance = 15)
     jest.spyOn(httpService, 'get').mockReturnValue(
       of({ data: { success: true, employeeId: employee.id, locationId: location.id, leaveTypeId: leaveType.id, balance: 15 } } as any),
     );

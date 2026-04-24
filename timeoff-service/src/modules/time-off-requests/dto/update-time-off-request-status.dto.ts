@@ -1,6 +1,6 @@
 import { IsEnum, IsNotEmpty } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
-import { TimeOffRequestStatus } from '../time-off-request.entity';
+import { TimeOffRequestStatus } from '../../../database/entities/time-off-request.entity';
 
 export class UpdateTimeOffRequestStatusDto {
   @ApiProperty({

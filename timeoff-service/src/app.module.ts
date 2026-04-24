@@ -20,7 +20,7 @@ import { SyncModule } from './modules/sync/sync.module';
       useFactory: (configService: ConfigService) => ({
         type: 'better-sqlite3',
         database: configService.get<string>('DATABASE_PATH', './timeoff.db'),
-        entities: [__dirname + '/**/*.entity{.ts,.js}'],
+        entities: [__dirname + '/database/entities/*.entity{.ts,.js}'],
         synchronize: true,
       }),
       inject: [ConfigService],

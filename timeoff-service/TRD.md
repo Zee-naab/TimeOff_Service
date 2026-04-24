@@ -1,6 +1,6 @@
 # Time-Off Microservice — Technical Requirements Document
 
-**Version:** 1.0  
+**Version:** 1.1  
 **Date:** April 2026  
 **Status:** Final
 
@@ -113,13 +113,36 @@ If two time-off requests are submitted near-simultaneously, both may pass the in
 | Component | Responsibility |
 |-----------|---------------|
 | **Time-Off Microservice** | Business logic, request validation, balance enforcement, sync orchestration |
-| **SQLite Database** | Local persistence of all entities; local balance cache |
+| **SQLite Database** | Local persistence of all entities; append-only ledger of balance changes |
 | **HCM System** | Authoritative source of truth for leave entitlements and balances |
 | **Mock HCM Server** | Standalone Express server that simulates HCM for local development and testing |
 
+### Source structure
+
+The service enforces a strict three-layer separation inside `src/`:
+
+```
+src/
+├── database/
+│   ├── entities/         ← All TypeORM entity classes (single source of truth)
+│   ├── repositories/     ← Custom repository classes (all DB queries live here)
+│   ├── types/            ← Shared TypeScript interfaces (BalanceSummary, HCM shapes)
+│   └── database.module.ts← Single TypeOrmModule.forFeature + exports all repositories
+├── modules/
+│   ├── employees/        ← Controller + Service + DTOs (no entity files)
+│   ├── locations/
+│   ├── leave-types/
+│   ├── leave-balances/
+│   ├── time-off-requests/
+│   └── sync/
+└── common/               ← Guards, filters, interceptors
+```
+
+Each feature module imports `DatabaseModule` to get access to all repository providers. Services contain only business logic (validation, error throwing, orchestration); all TypeORM queries are encapsulated in repository classes.
+
 ### Key design principle
 
-The microservice never writes balances to HCM — it only reads from it. All writes (deducting balance on approval, restoring on rejection) happen in the local SQLite database only. HCM is treated as read-only from this service's perspective, and a sync always flows in one direction: **HCM → local DB**.
+The microservice never writes balances to HCM — it only reads from it. All writes (appending ledger entries on approval, restoration, or sync) happen in the local SQLite database only. HCM is treated as read-only from this service's perspective, and a sync always flows in one direction: **HCM → local DB**.
 
 ---
 
@@ -128,9 +151,10 @@ The microservice never writes balances to HCM — it only reads from it. All wri
 ### Entity relationship overview
 
 ```
-Employee ──< LeaveBalance >── Location
+Employee ──< LedgerEntry >── Location
                 │
             LeaveType
+            TimeOffRequest (nullable FK)
 
 Employee ──< TimeOffRequest >── Location
                 │
@@ -165,9 +189,9 @@ SyncLog (standalone audit table)
 | `name` | varchar | NOT NULL (e.g. Vacation, Sick, Personal) |
 | `created_at` | timestamp | auto |
 
-### 4.4 LeaveBalance
+### 4.4 LedgerEntry
 
-The central entity. Stores how many days an employee has available for a specific leave type at a specific location.
+The central entity. Replaces the old single-row `LeaveBalance` table with an append-only ledger. Every change to a balance — whether from an HCM sync, an approval deduction, or a rejection/cancellation restoration — is recorded as a separate row. The current balance for any `(employee, location, leave_type)` combination is always derived by `SUM(amount)` across all matching rows.
 
 | Field | Type | Constraints |
 |-------|------|-------------|
@@ -175,17 +199,35 @@ The central entity. Stores how many days an employee has available for a specifi
 | `employee_id` | FK → Employee | NOT NULL |
 | `location_id` | FK → Location | NOT NULL |
 | `leave_type_id` | FK → LeaveType | NOT NULL |
-| `balance` | decimal(10,2) | NOT NULL, ≥ 0 |
-| `last_synced_at` | timestamp | nullable |
+| `amount` | decimal(10,2) | NOT NULL — positive = credit, negative = debit |
+| `entry_type` | enum | NOT NULL — `SYNC`, `DEDUCTION`, or `RESTORATION` |
+| `time_off_request_id` | FK → TimeOffRequest | nullable — set on DEDUCTION / RESTORATION entries |
 | `created_at` | timestamp | auto |
-| `updated_at` | timestamp | auto |
 
-**Unique constraint:** `(employee_id, location_id, leave_type_id)` — prevents duplicate balance rows for the same combination.
+**No unique constraint** — multiple rows per `(employee, location, leave_type)` are expected and required.
+
+**Entry types:**
+
+| Type | When written | Amount |
+|------|-------------|--------|
+| `SYNC` | HCM realtime or batch sync | Delta from current balance to HCM-reported value |
+| `DEDUCTION` | Time-off request is approved | Negative (days taken) |
+| `RESTORATION` | Approved request is rejected or cancelled | Positive (days returned) |
+
+**Balance computation:**
+```sql
+SELECT COALESCE(SUM(amount), 0)
+FROM ledger_entries
+WHERE employee_id = ? AND location_id = ? AND leave_type_id = ?
+```
+
+**Why a ledger instead of a single mutable row:**  
+A mutable balance row requires an UPDATE for every change, which loses the history of how the balance arrived at its current value. The ledger approach records every change as a new immutable row — deductions, restorations, and sync corrections are all first-class facts. This provides a full audit trail without any additional infrastructure. The current balance is always computable from the ledger's SUM, and `last_synced_at` is derivable from the most recent SYNC entry's `created_at`.
 
 **Why balances are stored locally:**  
-Querying HCM live for every page load or balance check is impractical. HCM systems are often slow (>500 ms), rate-limited, or temporarily unavailable. Storing a local copy means employees can always view their balance and submit requests even if HCM is down. The sync mechanism ensures the local copy stays reasonably current. This is a deliberate trade-off: slight staleness in exchange for resilience and speed.
+Querying HCM live for every page load or balance check is impractical. HCM systems are often slow (>500 ms), rate-limited, or temporarily unavailable. Storing a local ledger means employees can always view their balance and submit requests even if HCM is down. The sync mechanism ensures the ledger stays reasonably current. This is a deliberate trade-off: slight staleness in exchange for resilience and speed.
 
-### 4.5 TimeOffRequest
+### 4.5 TimeOffRequest (unchanged)
 
 | Field | Type | Constraints |
 |-------|------|-------------|
@@ -222,7 +264,7 @@ Querying HCM live for every page load or balance check is impractical. HCM syste
 - `APPROVED → CANCELLED`: balance is restored
 - `CANCELLED → *`: not allowed (terminal state)
 
-### 4.6 SyncLog
+### 4.6 SyncLog (unchanged)
 
 Audit record written after every sync operation, regardless of outcome.
 
@@ -279,16 +321,16 @@ Standard CRUD. Defines the categories of leave (Vacation, Sick, Personal, etc.).
 
 ### 5.4 Leave Balances
 
-Core read/write operations for balance records. Used by employees (to view balance) and by the sync engine (to update records after HCM sync).
+Balance query and ledger-entry management endpoints. `GET` responses return **computed summaries** (current balance derived from the ledger SUM, plus `last_synced_at`). `POST` adds an initial SYNC ledger entry. `GET/PUT/DELETE /:id` operate on individual ledger entry rows by their entry ID.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/leave-balances` | List all balance records with full relations |
-| GET | `/leave-balances/:id` | Get a single balance record by ID |
-| GET | `/leave-balances/employee/:employeeId` | All balances for one employee |
-| POST | `/leave-balances` | Manually create a balance record |
-| PUT | `/leave-balances/:id` | Update a balance value directly |
-| DELETE | `/leave-balances/:id` | Remove a balance record |
+| GET | `/leave-balances` | List computed balance summaries for all (employee, location, leave_type) combinations |
+| GET | `/leave-balances/employee/:employeeId` | Computed balance summaries for one employee |
+| GET | `/leave-balances/:id` | Get a specific ledger entry by its row ID |
+| POST | `/leave-balances` | Add an initial SYNC ledger entry (sets opening balance) |
+| PUT | `/leave-balances/:id` | Update the amount of a specific ledger entry (manual correction) |
+| DELETE | `/leave-balances/:id` | Remove a specific ledger entry |
 
 ### 5.5 Time Off Requests
 
@@ -341,10 +383,11 @@ SyncService calls GET /hcm/balance/:e/:l/:lt
     ┌────┴────┐
   Success   Error
     │           │
-    ▼           ▼
-Upsert local  Write FAILED
-LeaveBalance  SyncLog entry
-record        (do not crash)
+    ▼              ▼
+Compute delta   Write FAILED
+= HCM - local   SyncLog entry
+Append SYNC     (do not crash)
+ledger entry
     │
     ▼
 Write SUCCESS SyncLog entry
@@ -377,8 +420,9 @@ SyncService calls POST /hcm/batch
     ▼           ▼
 For each balance  Write FAILED
 in response:      SyncLog entry
-  upsert local
-  LeaveBalance
+  compute delta
+  append SYNC
+  ledger entry
     │
     ▼
 Write SUCCESS SyncLog
@@ -396,13 +440,13 @@ HCM is always the source of truth. The local balance exists solely for speed and
 
 | Scenario | Resolution |
 |----------|-----------|
-| Local balance says insufficient | Reject request immediately. Do not call HCM. |
-| Local balance says OK, HCM disagrees | HCM wins. The deduction is rejected. A FAILED sync log is written. |
-| HCM is unreachable | Log FAILED. Local balance remains unchanged. Request stays PENDING. |
-| HCM returns a higher balance than local | Upsert local record with HCM value on next sync. |
-| HCM returns a lower balance than local | Same — upsert replaces local with HCM value. |
+| Computed ledger balance is insufficient | Reject request immediately. Do not call HCM. |
+| Ledger balance says OK, HCM disagrees | HCM wins. The deduction is rejected. A FAILED sync log is written. |
+| HCM is unreachable | Log FAILED. Ledger is unchanged. Request stays PENDING. |
+| HCM returns a higher balance than computed local | A positive SYNC delta entry is appended on next sync. |
+| HCM returns a lower balance than computed local | A negative SYNC delta entry is appended on next sync. |
 
-This strategy means the local database is always updated from HCM, never the reverse.
+This strategy means the local ledger is always updated from HCM, never the reverse. The SYNC entry records the exact delta (`hcmBalance − currentLedgerBalance`), so the running SUM always converges to the HCM-reported value after each sync.
 
 ---
 
@@ -467,8 +511,8 @@ All errors — validation failures, not-found, conflicts, internal errors — re
 | `start_date` is after `end_date` | `400 Bad Request` | `TimeOffRequestsService.create()` |
 | Request body fails DTO validation | `400 Bad Request` | `ValidationPipe` |
 | Employee / Location / LeaveType not found | `404 Not Found` | Service `findOne()` methods |
-| No balance record for the combination | `400 Bad Request` | `LeaveBalancesService` |
-| Duplicate balance record | `400 Bad Request` | `LeaveBalancesService.create()` |
+| No ledger entries exist for the combination | `400 Bad Request` | `LeaveBalancesService` |
+| Opening balance already exists for the combination | `400 Bad Request` | `LeaveBalancesService.create()` |
 | Duplicate employee email | `409 Conflict` | `EmployeesService.create()` |
 | Trying to change a CANCELLED request | `409 Conflict` | `TimeOffRequestsService.updateStatus()` |
 | HCM is unreachable | No HTTP error to client | Caught in `SyncService`; writes `FAILED` SyncLog |
@@ -492,7 +536,7 @@ The project uses a three-tier testing approach with 33 tests across 6 suites.
 | `time-off-requests.service.spec.ts` | 8 | Create (sufficient / insufficient / bad dates / no record), `findOne` 404, approve deducts, reject restores, cancel restores, ConflictException on CANCELLED |
 | `sync.service.spec.ts` | 4 | Realtime SUCCESS, realtime FAILED, batch upserts all records, batch handles empty response |
 
-**Approach:** Each service is tested in complete isolation. All TypeORM repositories and all injected services are replaced with Jest factory mocks. No database, no HTTP, no NestJS runtime overhead. Tests run in ~10 seconds.
+**Approach:** Each service is tested in complete isolation. All custom repository classes (`EmployeeRepository`, `LedgerEntryRepository`, etc.) and all injected services are replaced with Jest factory mocks — no TypeORM token gymnastics needed. No database, no HTTP, no NestJS runtime overhead. Tests run in ~10 seconds.
 
 ### 9.2 Integration Tests — 8 tests
 
@@ -501,7 +545,7 @@ The project uses a three-tier testing approach with 33 tests across 6 suites.
 | `leave-balance-sync.spec.ts` | 3 | Realtime sync updates DB record, batch sync updates all DB records, anniversary bonus reflected after sync |
 | `time-off-request-flow.spec.ts` | 5 | Approve deducts balance, reject restores, cancel restores, creation fails when balance exceeded, race-condition guard prevents over-deduction |
 
-**Approach:** A real NestJS `TestingModule` is bootstrapped with all application modules and a `better-sqlite3` in-memory database (`database: ':memory:'`). Only `HttpService` (HCM calls) is mocked using `jest.spyOn`. Every test verifies actual database state after the operation. Tables are truncated in `beforeEach` for isolation. Tests run in ~30 seconds.
+**Approach:** A real NestJS `TestingModule` is bootstrapped with all application modules (including `DatabaseModule`) and a `better-sqlite3` in-memory database (`database: ':memory:'`). Only `HttpService` (HCM calls) is mocked using `jest.spyOn`. Every test verifies actual database state after the operation. The `ledger_entries` table (and other tables) are truncated in `beforeEach` for isolation. Tests run in ~30 seconds.
 
 ### 9.3 E2E Tests
 
@@ -524,13 +568,13 @@ The standalone Express server in `mock-hcm/` simulates HCM for **manual testing 
 
 ### Alternative 1: Always query HCM live — no local balance storage
 
-**Approach:** Remove the local `LeaveBalance` table. Every balance check calls HCM directly.
+**Approach:** Remove the local `ledger_entries` table. Every balance check calls HCM directly.
 
 | | Detail |
 |-|--------|
-| **Pro** | Balance is always 100% accurate. No sync complexity. |
+| **Pro** | Balance is always 100% accurate. No sync complexity, no ledger to maintain. |
 | **Con** | Every employee page load depends on HCM availability. If HCM is slow (>1s) or down, employees cannot view their balance or submit requests. HCM rate limits become a service-level concern. |
-| **Decision** | **Rejected.** Tight coupling to HCM availability is unacceptable for a user-facing service. Local caching with sync is the industry-standard pattern for this problem. |
+| **Decision** | **Rejected.** Tight coupling to HCM availability is unacceptable for a user-facing service. Local storage with sync is the industry-standard pattern for this problem. |
 
 ---
 
@@ -577,11 +621,13 @@ The standalone Express server in `mock-hcm/` simulates HCM for **manual testing 
 | High | **Scheduled batch sync** via cron (`@nestjs/schedule`) | Automates the nightly refresh without manual intervention |
 | High | **Switch to PostgreSQL** for production deployment | Better concurrency guarantees; row-level locking eliminates the race-condition risk at the database level |
 | Medium | **Role-based access control** (Employee vs Manager vs Admin) | Employees should not be able to approve their own requests; managers should only see their team |
-| Medium | **Redis cache** for high-traffic balance lookups | Avoids repeated DB reads for frequently accessed balances |
+| Medium | **Redis cache** for high-traffic balance lookups | Avoids repeated DB reads on the `SUM(amount)` query for frequently accessed balances |
 | Medium | **Webhook receiver** for HCM push notifications | Eliminates polling latency when the HCM system supports outbound events |
-| Low | **Audit trail** for all balance changes | Full history of every deduction and restoration, beyond SyncLog |
+| Medium | **Ledger compaction** (periodic snapshot) | After the ledger grows large, periodically materialise a snapshot row so SUM only spans recent entries |
 | Low | **Soft deletes** on employees and requests | Preserves historical data for reporting instead of hard-deleting records |
 | Low | **Pagination** on list endpoints | Required once employee and request counts grow beyond a few hundred |
+
+> **Note — Audit trail:** The `ledger_entries` table is itself the audit trail. Every balance change (SYNC, DEDUCTION, RESTORATION) is an immutable append-only row with a timestamp and an optional link to the triggering `TimeOffRequest`. No separate audit log table is needed.
 
 ---
 

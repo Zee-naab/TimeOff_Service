@@ -7,9 +7,9 @@ import {
   ManyToOne,
   JoinColumn,
 } from 'typeorm';
-import { Employee } from '../employees/employee.entity';
-import { Location } from '../locations/location.entity';
-import { LeaveType } from '../leave-types/leave-type.entity';
+import { Employee } from './employee.entity';
+import { Location } from './location.entity';
+import { LeaveType } from './leave-type.entity';
 
 export enum TimeOffRequestStatus {
   PENDING = 'PENDING',

@@ -1,11 +1,10 @@
 import { Module } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
-import { LeaveType } from './leave-type.entity';
+import { DatabaseModule } from '../../database/database.module';
 import { LeaveTypesService } from './leave-types.service';
 import { LeaveTypesController } from './leave-types.controller';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([LeaveType])],
+  imports: [DatabaseModule],
   providers: [LeaveTypesService],
   controllers: [LeaveTypesController],
   exports: [LeaveTypesService],

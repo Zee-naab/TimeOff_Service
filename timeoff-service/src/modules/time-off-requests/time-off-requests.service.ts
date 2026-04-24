@@ -4,44 +4,30 @@ import {
   BadRequestException,
   ConflictException,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { TimeOffRequest, TimeOffRequestStatus } from './time-off-request.entity';
+import { TimeOffRequest, TimeOffRequestStatus } from '../../database/entities/time-off-request.entity';
+import { TimeOffRequestRepository } from '../../database/repositories/time-off-request.repository';
+import { LeaveBalancesService } from '../leave-balances/leave-balances.service';
 import { CreateTimeOffRequestDto } from './dto/create-time-off-request.dto';
 import { UpdateTimeOffRequestStatusDto } from './dto/update-time-off-request-status.dto';
-import { LeaveBalancesService } from '../leave-balances/leave-balances.service';
 
 @Injectable()
 export class TimeOffRequestsService {
   constructor(
-    @InjectRepository(TimeOffRequest)
-    private readonly timeOffRequestRepository: Repository<TimeOffRequest>,
+    private readonly timeOffRequestRepository: TimeOffRequestRepository,
     private readonly leaveBalancesService: LeaveBalancesService,
   ) {}
 
   findAll(): Promise<TimeOffRequest[]> {
-    return this.timeOffRequestRepository.find({
-      relations: ['employee', 'location', 'leave_type', 'manager'],
-      order: { created_at: 'DESC' },
-    });
+    return this.timeOffRequestRepository.findAll();
   }
 
   findByEmployee(employeeId: number): Promise<TimeOffRequest[]> {
-    return this.timeOffRequestRepository.find({
-      where: { employee: { id: employeeId } },
-      relations: ['employee', 'location', 'leave_type', 'manager'],
-      order: { created_at: 'DESC' },
-    });
+    return this.timeOffRequestRepository.findByEmployee(employeeId);
   }
 
   async findOne(id: number): Promise<TimeOffRequest> {
-    const request = await this.timeOffRequestRepository.findOne({
-      where: { id },
-      relations: ['employee', 'location', 'leave_type', 'manager'],
-    });
-    if (!request) {
-      throw new NotFoundException(`TimeOffRequest with ID ${id} not found`);
-    }
+    const request = await this.timeOffRequestRepository.findOne(id);
+    if (!request) throw new NotFoundException(`TimeOffRequest with ID ${id} not found`);
     return request;
   }
 
@@ -51,17 +37,13 @@ export class TimeOffRequestsService {
     }
 
     const balance = await this.leaveBalancesService.findByEmployeeLocationLeaveType(
-      dto.employee_id,
-      dto.location_id,
-      dto.leave_type_id,
+      dto.employee_id, dto.location_id, dto.leave_type_id,
     );
-
     if (!balance) {
       throw new BadRequestException(
         `No leave balance found for employee ${dto.employee_id} at this location/leave-type combination`,
       );
     }
-
     if (Number(balance.balance) < dto.days_requested) {
       throw new BadRequestException(
         `Insufficient balance. Available: ${balance.balance}, Requested: ${dto.days_requested}`,
@@ -78,7 +60,6 @@ export class TimeOffRequestsService {
       days_requested: dto.days_requested,
       status: TimeOffRequestStatus.PENDING,
     });
-
     return this.timeOffRequestRepository.save(request);
   }
 
