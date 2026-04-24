@@ -1,0 +1,26 @@
+# Dependencies — all nested node_modules
+node_modules/
+
+# Build output
+dist/
+
+# SQLite databases
+*.db
+
+# Environment files
+.env
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test coverage
+coverage/
+.nyc_output/
+
+# TypeScript build info
+*.tsbuildinfo
