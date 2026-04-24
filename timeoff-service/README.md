@@ -180,6 +180,53 @@ npm run test:cov
 npm run test:e2e
 ```
 
+## Mock HCM Server Details
+
+The mock HCM server starts with **12 pre-seeded balance records** (3 employees × 2 locations × 2 leave types):
+
+| Employee | Location | Leave Type | Balance |
+|----------|----------|------------|---------|
+| 1, 2, 3 | 1, 2 | 1 (Vacation) | 10 days |
+| 1, 2, 3 | 1, 2 | 2 (Sick) | 5 days |
+
+All requests require the header: `x-api-key: mock-hcm-secret`
+
+### Example curl commands
+
+**Get a specific balance:**
+```bash
+curl -H "x-api-key: mock-hcm-secret" \
+  http://localhost:4000/hcm/balance/1/1/1
+# → { "success": true, "employeeId": 1, "locationId": 1, "leaveTypeId": 1, "balance": 10 }
+```
+
+**Set a balance manually:**
+```bash
+curl -X POST http://localhost:4000/hcm/balance/update \
+  -H "x-api-key: mock-hcm-secret" \
+  -H "Content-Type: application/json" \
+  -d '{ "employeeId": 1, "locationId": 1, "leaveTypeId": 1, "balance": 20 }'
+```
+
+**Fetch all balances (batch):**
+```bash
+curl -X POST http://localhost:4000/hcm/batch \
+  -H "x-api-key: mock-hcm-secret" \
+  -H "Content-Type: application/json"
+# → { "success": true, "balances": [ ... all 12 records ... ] }
+```
+
+**Simulate a work anniversary bonus (+3 Vacation days for employee 1 at location 1):**
+```bash
+curl -X POST http://localhost:4000/hcm/simulate/anniversary \
+  -H "x-api-key: mock-hcm-secret" \
+  -H "Content-Type: application/json" \
+  -d '{ "employeeId": 1, "locationId": 1, "leaveTypeId": 1, "bonusDays": 3 }'
+# → { "success": true, "employeeId": 1, "locationId": 1, "leaveTypeId": 1, "balance": 13, "bonusDaysAdded": 3 }
+```
+
+After running the anniversary endpoint, call `POST /sync/realtime` in the main service to pull the updated balance into the local database.
+
 ## Typical Dev Workflow
 
 1. Start the mock HCM server: `cd mock-hcm && npm start`

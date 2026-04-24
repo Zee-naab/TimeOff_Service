@@ -69,7 +69,8 @@
     "rootDir": ".",
     "testMatch": [
       "<rootDir>/src/**/*.spec.ts",
-      "<rootDir>/test/unit/**/*.spec.ts"
+      "<rootDir>/test/unit/**/*.spec.ts",
+      "<rootDir>/test/integration/**/*.spec.ts"
     ],
     "transform": {
       "^.+\\.(t|j)s$": "ts-jest"
@@ -79,6 +80,7 @@
     ],
     "coverageDirectory": "./coverage",
     "testEnvironment": "node",
+    "testTimeout": 30000,
     "moduleNameMapper": {
       "^src/(.*)$": "<rootDir>/src/$1"
     }

@@ -7,123 +7,138 @@ const PORT = 4000;
 app.use(cors());
 app.use(express.json());
 
-// In-memory storage for employee balances
-// Structure: { "employeeId_locationId_leaveTypeId": balance }
-const db = new Map<string, number>();
+// ─── Request logger ───────────────────────────────────────────────────────────
+app.use((req: Request, _res: Response, next: NextFunction) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
+  next();
+});
 
-// Seed mock data
-function seedData() {
-  // Employees: 1, 2, 3
-  // Locations: 1, 2
-  // LeaveTypes: 1 (Vacation), 2 (Sick)
+// ─── In-memory store ──────────────────────────────────────────────────────────
+interface BalanceRecord {
+  employeeId: number;
+  locationId: number;
+  leaveTypeId: number;
+  balance: number;
+}
 
-  db.set('1_1_1', 15.0); // Employee 1, Loc 1, Vacation -> 15 days
-  db.set('1_1_2', 5.0);  // Employee 1, Loc 1, Sick -> 5 days
+const store = new Map<string, BalanceRecord>();
 
-  db.set('2_1_1', 10.0);
-  db.set('2_1_2', 3.0);
+function key(empId: number, locId: number, ltId: number): string {
+  return `${empId}_${locId}_${ltId}`;
+}
 
-  db.set('3_2_1', 20.0);
-  db.set('3_2_2', 10.0);
-  console.log('Mock database seeded.');
+// Seed: 3 employees × 2 locations × 2 leave types
+// leaveTypeId 1 = Vacation (10 days), 2 = Sick (5 days)
+function seedData(): void {
+  for (const empId of [1, 2, 3]) {
+    for (const locId of [1, 2]) {
+      store.set(key(empId, locId, 1), { employeeId: empId, locationId: locId, leaveTypeId: 1, balance: 10 });
+      store.set(key(empId, locId, 2), { employeeId: empId, locationId: locId, leaveTypeId: 2, balance: 5 });
+    }
+  }
+  console.log(`[${new Date().toISOString()}] Seeded ${store.size} balance records`);
 }
 
 seedData();
 
-// Middleware to check API key
-function checkAuth(req: Request, res: Response, next: NextFunction) {
-  const apiKey = req.headers['x-api-key'];
-  if (apiKey !== 'mock-hcm-secret') {
-    return res.status(401).json({ success: false, message: 'Unauthorized' });
-  }
-  next();
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+function errorRes(res: Response, statusCode: number, message: string) {
+  return res.status(statusCode).json({ success: false, message, statusCode });
 }
 
-app.use(checkAuth);
+// ─── Auth middleware ──────────────────────────────────────────────────────────
+app.use((req: Request, res: Response, next: NextFunction) => {
+  const apiKey = req.headers['x-api-key'];
+  if (!apiKey || apiKey !== 'mock-hcm-secret') {
+    return errorRes(res, 401, 'Unauthorized: invalid or missing x-api-key header');
+  }
+  next();
+});
 
-// GET /hcm/balance/:employeeId/:locationId/:leaveTypeId -> returns balance
+// ─── GET /hcm/balance/:employeeId/:locationId/:leaveTypeId ────────────────────
 app.get('/hcm/balance/:employeeId/:locationId/:leaveTypeId', (req: Request, res: Response) => {
-  const { employeeId, locationId, leaveTypeId } = req.params;
-  const key = `${employeeId}_${locationId}_${leaveTypeId}`;
+  const empId = parseInt(req.params.employeeId, 10);
+  const locId = parseInt(req.params.locationId, 10);
+  const ltId = parseInt(req.params.leaveTypeId, 10);
 
-  if (db.has(key)) {
-    return res.json({ success: true, balance: db.get(key) });
+  if (isNaN(empId) || isNaN(locId) || isNaN(ltId)) {
+    return errorRes(res, 400, 'employeeId, locationId and leaveTypeId must be integers');
   }
 
-  return res.status(404).json({ success: false, message: 'Balance not found for the given combination' });
+  const record = store.get(key(empId, locId, ltId));
+  if (!record) {
+    return errorRes(
+      res,
+      404,
+      `Balance not found for employee=${empId}, location=${locId}, leaveType=${ltId}`,
+    );
+  }
+
+  return res.json({ success: true, ...record });
 });
 
-// POST /hcm/balance/update -> updates a single employee balance
-// Expected body: { employeeId, locationId, leaveTypeId, amount, operation: 'add' | 'subtract' | 'set' }
+// ─── POST /hcm/balance/update ─────────────────────────────────────────────────
 app.post('/hcm/balance/update', (req: Request, res: Response) => {
-  const { employeeId, locationId, leaveTypeId, amount, operation } = req.body;
-  
-  if (!employeeId || !locationId || !leaveTypeId || amount === undefined || !operation) {
-    return res.status(400).json({ success: false, message: 'Missing required parameters' });
+  const { employeeId, locationId, leaveTypeId, balance } = req.body;
+
+  if (employeeId == null || locationId == null || leaveTypeId == null || balance == null) {
+    return errorRes(res, 400, 'Missing required fields: employeeId, locationId, leaveTypeId, balance');
   }
 
-  const key = `${employeeId}_${locationId}_${leaveTypeId}`;
-  let currentBalance = db.has(key) ? db.get(key)! : 0;
-
-  if (operation === 'subtract' && currentBalance < amount) {
-    return res.status(400).json({ success: false, message: 'Insufficient balance' });
+  if (typeof balance !== 'number' || balance < 0) {
+    return errorRes(res, 400, 'balance must be a non-negative number');
   }
 
-  if (operation === 'add') {
-    currentBalance += amount;
-  } else if (operation === 'subtract') {
-    currentBalance -= amount;
-  } else if (operation === 'set') {
-    currentBalance = amount;
-  } else {
-    return res.status(400).json({ success: false, message: 'Invalid operation' });
-  }
+  const empId = Number(employeeId);
+  const locId = Number(locationId);
+  const ltId = Number(leaveTypeId);
+  const k = key(empId, locId, ltId);
 
-  db.set(key, currentBalance);
-  return res.json({ success: true, balance: currentBalance });
+  const record: BalanceRecord = { employeeId: empId, locationId: locId, leaveTypeId: ltId, balance };
+  store.set(k, record);
+
+  return res.json({ success: true, ...record });
 });
 
-// POST /hcm/batch -> returns all balances at once
-app.post('/hcm/batch', (req: Request, res: Response) => {
-  const balances = [];
-  for (const [key, balance] of db.entries()) {
-    const [employeeId, locationId, leaveTypeId] = key.split('_');
-    balances.push({
-      employeeId: parseInt(employeeId),
-      locationId: parseInt(locationId),
-      leaveTypeId: parseInt(leaveTypeId),
-      balance
-    });
-  }
+// ─── POST /hcm/batch ──────────────────────────────────────────────────────────
+app.post('/hcm/batch', (_req: Request, res: Response) => {
+  const balances = Array.from(store.values());
   return res.json({ success: true, balances });
 });
 
-// POST /hcm/simulate/anniversary -> simulates a work anniversary bonus
-// Expected body: { employeeId, daysToAdd }
+// ─── POST /hcm/simulate/anniversary ──────────────────────────────────────────
 app.post('/hcm/simulate/anniversary', (req: Request, res: Response) => {
-  const { employeeId, daysToAdd } = req.body;
-  
-  if (!employeeId || !daysToAdd) {
-    return res.status(400).json({ success: false, message: 'Missing employeeId or daysToAdd' });
+  const { employeeId, locationId, leaveTypeId, bonusDays } = req.body;
+
+  if (employeeId == null || locationId == null || leaveTypeId == null || bonusDays == null) {
+    return errorRes(res, 400, 'Missing required fields: employeeId, locationId, leaveTypeId, bonusDays');
   }
 
-  let updated = 0;
-  // Add days to all vacation (assume leaveTypeId = 1 is vacation)
-  for (const [key, balance] of db.entries()) {
-    const [eId, lId, lTypeId] = key.split('_');
-    if (eId === String(employeeId) && lTypeId === '1') {
-      db.set(key, balance + daysToAdd);
-      updated++;
-    }
+  if (typeof bonusDays !== 'number' || bonusDays <= 0) {
+    return errorRes(res, 400, 'bonusDays must be a positive number');
   }
 
-  if (updated === 0) {
-    return res.status(404).json({ success: false, message: 'No vacation records found for employee' });
+  const empId = Number(employeeId);
+  const locId = Number(locationId);
+  const ltId = Number(leaveTypeId);
+  const k = key(empId, locId, ltId);
+  const record = store.get(k);
+
+  if (!record) {
+    return errorRes(
+      res,
+      404,
+      `Balance not found for employee=${empId}, location=${locId}, leaveType=${ltId}`,
+    );
   }
 
-  return res.json({ success: true, message: `Added ${daysToAdd} days to employee ${employeeId}'s vacation balance` });
+  record.balance += bonusDays;
+  store.set(k, record);
+
+  return res.json({ success: true, ...record, bonusDaysAdded: bonusDays });
 });
 
+// ─── Start ────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`Mock HCM Server running on http://localhost:${PORT}`);
+  console.log(`[${new Date().toISOString()}] Mock HCM Server running on http://localhost:${PORT}`);
 });
